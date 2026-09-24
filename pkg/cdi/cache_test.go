@@ -1917,6 +1917,79 @@ func TestCacheConcurrentConfigure(t *testing.T) {
 	wg.Wait()
 }
 
+// TestNewCacheConfiguresWithLockHeld verifies configure() runs with the cache locked.
+// An Option runs inside it, so TryLock fails there only while the constructor holds it.
+func TestNewCacheConfiguresWithLockHeld(t *testing.T) {
+	held := false
+
+	newCache(
+		func(c *Cache) {
+			if c.mu.TryLock() {
+				c.mu.Unlock()
+				return
+			}
+			held = true
+		},
+		WithSpecDirs(t.TempDir()),
+		WithAutoRefresh(false),
+	)
+
+	require.True(t, held, "configure() has to run with the cache lock held")
+}
+
+// TestCacheConcurrentNewCache verifies construction is synchronized with the watcher it starts.
+func TestCacheConcurrentNewCache(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "spec.json")
+	spec := []byte(`{"cdiVersion":"0.3.0","kind":"vendor.com/device","devices":[{"name":"dev","containerEdits":{"env":["FOO=bar"]}}]}`)
+
+	const iterations = 20
+
+	stop := make(chan struct{})
+	caches := make([]*Cache, 0, iterations)
+
+	var wg sync.WaitGroup
+
+	// Nothing closes a Cache, and dropping one does not stop its watcher.
+	t.Cleanup(func() {
+		close(stop)
+		wg.Wait()
+
+		for _, cache := range caches {
+			assert.NoError(t, cache.Configure(WithAutoRefresh(false)))
+		}
+	})
+
+	require.NoError(t, os.WriteFile(path, spec, 0o644))
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if err := os.WriteFile(path, spec, 0o644); err != nil {
+				t.Errorf("failed to write Spec file: %v", err)
+				return
+			}
+		}
+	}()
+
+	for range iterations {
+		cache, err := NewCache(WithSpecDirs(dir))
+		require.NoError(t, err)
+		require.NotNil(t, cache)
+		caches = append(caches, cache)
+		// NewCache reports no error when it could not watch dir, and without
+		// a watcher there is nothing to race with.
+		require.Empty(t, cache.GetSpecDirErrors())
+	}
+}
+
 func int64ptr(v int64) *int64 {
 	return &v
 }
