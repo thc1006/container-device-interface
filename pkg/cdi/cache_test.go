@@ -188,15 +188,25 @@ devices:
 				filepath.Join(dir, "run")),
 			)
 
+			// Registered after the Spec directories, so the watcher goes away
+			// before they are removed under it.
+			t.Cleanup(func() {
+				assert.NoError(t, cache.Configure(WithAutoRefresh(false)))
+			})
+
 			if len(tc.dirErrors) != 0 {
 				for specDir = range tc.dirErrors {
 					specDir = filepath.Join(dir, specDir)
 					require.NotNil(t, cache.GetSpecDirErrors()[specDir])
-					return
 				}
+				return
 			}
 
 			require.NotNil(t, cache)
+
+			// The watcher is still running and refreshes under the lock.
+			cache.mu.RLock()
+			defer cache.mu.RUnlock()
 
 			for name, dev := range cache.devices {
 				require.Equal(t, filepath.Join(dir, tc.sources[name]),
